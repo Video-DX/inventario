@@ -23,7 +23,7 @@ button.on,button.pri{background:var(--acc);border-color:var(--acc);color:#fff;fo
 button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
 .cam{position:relative;background:#000;border-radius:8px;overflow:hidden;aspect-ratio:4/3}
 video{width:100%;height:100%;object-fit:cover;display:block}
-.frame{position:absolute;left:8%;right:8%;top:36%;height:28%;border:3px solid var(--frame);border-radius:6px;box-shadow:0 0 0 999px rgba(0,0,0,.45);pointer-events:none}
+.frame{position:absolute;left:8%;right:8%;top:25%;height:50%;border:3px solid var(--frame);border-radius:6px;box-shadow:0 0 0 999px rgba(0,0,0,.45);pointer-events:none}
 .frame.wide{top:12%;height:76%}
 .status{margin:8px 0 0;color:var(--mute);min-height:1.4em}
 .row{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
@@ -34,6 +34,10 @@ input,textarea{width:100%;font-size:1rem;padding:9px;border:1px solid var(--line
 .item{border-top:1px solid var(--line);padding:8px 0;display:flex;justify-content:space-between;gap:8px;align-items:center}
 .item:first-child{border-top:0}.item small{color:var(--mute)}
 .item button{padding:6px 10px}
+.seg{display:flex;gap:6px;margin:10px 0 0}.seg button{flex:1;padding:8px 6px}
+.seg button.on{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:700}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}.chip{padding:6px 10px;font-size:.95rem}
+textarea.raw{min-height:96px;font-size:.9rem}
 canvas#work{display:none}
 </style>
 </head>
@@ -52,16 +56,26 @@ canvas#work{display:none}
     <button id="bCam" class="pri">Iniciar cámara</button>
     <button id="bStop">Detener</button>
     <button id="bTorch" hidden>Linterna</button>
+    <button id="bRead" class="pri" hidden>Leer texto</button>
+  </div>
+  <div class="seg" id="seg" role="group" aria-label="Campo de destino">
+    <button data-d="fSerie" class="on">Va a: Serie</button><button data-d="fEsc">Otro código</button><button data-d="fModelo">Modelo</button>
+  </div>
+  <div id="ocrBox" hidden>
+    <label for="rawText">Texto leído (puedes corregirlo)</label>
+    <textarea id="rawText" class="raw mono" spellcheck="false"></textarea>
+    <label>Toca un texto para pasarlo al campo elegido arriba</label>
+    <div id="chips" class="chips"></div>
   </div>
 </section>
 
 <section class="card">
   <h2>Registro del equipo</h2>
-  <label for="fSerie">Serie / Service Tag</label>
+  <label for="fSerie">Número de serie / Service Tag</label>
   <input id="fSerie" class="mono" autocapitalize="characters" autocomplete="off">
   <div id="chk" class="chk"></div>
-  <label for="fEsc">Express Service Code (solo números)</label>
-  <input id="fEsc" class="mono" inputmode="numeric" autocomplete="off">
+  <label for="fEsc">Otro código (Express Service Code, P/N, etc.)</label>
+  <input id="fEsc" class="mono" autocomplete="off">
   <div class="grid">
     <div><label for="fMarca">Marca</label><input id="fMarca" placeholder="Dell"></div>
     <div><label for="fModelo">Modelo</label><input id="fModelo"></div>
@@ -91,7 +105,7 @@ canvas#work{display:none}
 const $ = id => document.getElementById(id);
 const video = $('video'), work = $('work'), ctx = work.getContext('2d', {willReadFrequently:true});
 let stream = null, mode = 'bar', timer = null, busy = false, detector = null, zxing = null, ocrWorker = null;
-let lastOcr = [];
+let lastOcr = [], loopId = 0;
 
 /* ---------- Utilidades Dell ---------- */
 const ST_RE = /^[A-Z0-9]{7}$/;
@@ -111,14 +125,14 @@ async function startCam(){
     const track = stream.getVideoTracks()[0], caps = track.getCapabilities ? track.getCapabilities() : {};
     if(caps.focusMode && caps.focusMode.includes('continuous')) track.applyConstraints({advanced:[{focusMode:'continuous'}]}).catch(()=>{});
     $('bTorch').hidden = !caps.torch;
-    setStatus(mode==='bar' ? 'Apunta al código de barras o QR.' : 'Encuadra la etiqueta dentro del recuadro.');
+    setStatus(mode==='bar' ? 'Apunta al código de barras o QR.' : 'Encuadra la etiqueta en el recuadro y toca “Leer texto”.');
     loop();
   }catch(e){
     setStatus('No se pudo abrir la cámara: ' + e.message + ' (requiere HTTPS y permiso de cámara).');
   }
 }
 async function stopCam(){
-  clearTimeout(timer); timer = null;
+  clearTimeout(timer); timer = null; loopId++;
   if(stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; }
   video.srcObject = null;
 }
@@ -129,30 +143,44 @@ $('bTorch').onclick = () => { torchOn = !torchOn; stream.getVideoTracks()[0].app
 function grab(crop){
   const vw = video.videoWidth, vh = video.videoHeight; if(!vw) return false;
   // el recuadro guía cubre aprox. el 84% x 28% (OCR) o 84% x 76% (barras) del video visible
-  const r = crop ? {x:.08,y:.36,w:.84,h:.28} : {x:.08,y:.12,w:.84,h:.76};
+  const r = crop ? {x:.08,y:.25,w:.84,h:.5} : {x:.08,y:.12,w:.84,h:.76};
   const sx = vw*r.x, sy = vh*r.y, sw = vw*r.w, sh = vh*r.h;
   const scale = crop ? Math.min(2, 1400/sw) : Math.min(1, 1280/sw);
   work.width = Math.round(sw*scale); work.height = Math.round(sh*scale);
   ctx.drawImage(video, sx, sy, sw, sh, 0, 0, work.width, work.height);
   return true;
 }
-function preprocess(){ // gris + contraste + umbral adaptativo simple (Otsu)
-  const img = ctx.getImageData(0,0,work.width,work.height), d = img.data, hist = new Array(256).fill(0);
-  for(let i=0;i<d.length;i+=4){ const g = (d[i]*.299+d[i+1]*.587+d[i+2]*.114)|0; d[i]=g; hist[g]++; }
-  const total = work.width*work.height; let sum=0; for(let i=0;i<256;i++) sum+=i*hist[i];
-  let sB=0,wB=0,max=0,th=128;
-  for(let t=0;t<256;t++){ wB+=hist[t]; if(!wB) continue; const wF=total-wB; if(!wF) break;
-    sB+=t*hist[t]; const mB=sB/wB, mF=(sum-sB)/wF, v=wB*wF*(mB-mF)**2; if(v>max){max=v;th=t;} }
-  for(let i=0;i<d.length;i+=4){ const v = d[i]>th?255:0; d[i]=d[i+1]=d[i+2]=v; }
+/* ---------- Preprocesado para OCR ---------- */
+function prep(binarize){ // gris + contraste; si el fondo es oscuro (texto claro) se invierte
+  const img = ctx.getImageData(0,0,work.width,work.height), d = img.data, n = work.width*work.height, hist = new Array(256).fill(0);
+  let sum = 0;
+  for(let i=0;i<d.length;i+=4){ const g = (d[i]*.299+d[i+1]*.587+d[i+2]*.114)|0; d[i]=g; hist[g]++; sum+=g; }
+  const dark = sum/n < 110;
+  let acc=0, lo=0, hi=255; for(let i=0;i<256;i++){ acc+=hist[i]; if(acc>=n*.02){lo=i;break;} }
+  acc=0; for(let i=255;i>=0;i--){ acc+=hist[i]; if(acc>=n*.02){hi=i;break;} }
+  const k = 255/Math.max(1,hi-lo);
+  for(let i=0;i<d.length;i+=4) d[i] = Math.max(0,Math.min(255,(d[i]-lo)*k));
+  if(binarize){
+    const h2 = new Array(256).fill(0); for(let i=0;i<d.length;i+=4) h2[d[i]|0]++;
+    let s2=0; for(let i=0;i<256;i++) s2+=i*h2[i];
+    let sB=0,wB=0,max=0,th=128;
+    for(let t=0;t<256;t++){ wB+=h2[t]; if(!wB) continue; const wF=n-wB; if(!wF) break;
+      sB+=t*h2[t]; const mB=sB/wB, mF=(s2-sB)/wF, v=wB*wF*(mB-mF)**2; if(v>max){max=v;th=t;} }
+    for(let i=0;i<d.length;i+=4) d[i] = d[i]>th ? 255 : 0;
+  }
+  for(let i=0;i<d.length;i+=4){ const v = dark ? 255-d[i] : d[i]; d[i]=d[i+1]=d[i+2]=v; }
   ctx.putImageData(img,0,0);
 }
 
-/* ---------- Bucle de lectura ---------- */
+/* ---------- Barras / QR (lectura continua) ---------- */
 function loop(){
-  if(!stream) return;
-  (mode==='bar' ? scanBar : scanOcr)().finally(()=>{ if(stream) timer = setTimeout(loop, mode==='bar' ? 150 : 700); });
+  const id = ++loopId;
+  (async function tick(){
+    if(!stream || mode !== 'bar' || id !== loopId) return;
+    await scanBar();
+    timer = setTimeout(tick, 150);
+  })();
 }
-
 async function scanBar(){
   if(!grab(false)) return;
   try{
@@ -165,62 +193,91 @@ async function scanBar(){
       const bmp = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(new ZXing.HTMLCanvasElementLuminanceSource(work)));
       text = zxing.decode(bmp).getText();
     }
-    if(text) onCode(text, 'código');
+    if(text) onCode(text);
   }catch(e){ /* sin código en este fotograma */ }
 }
+let lastShown = '', lastTime = 0;
+function onCode(text){
+  text = text.trim(); const now = Date.now();
+  if(text === lastShown && now - lastTime < 3000) return; lastShown = text; lastTime = now;
+  navigator.vibrate && navigator.vibrate(60);
+  const m = text.match(/service\s*tag=([A-Za-z0-9]{7})/i) || text.match(/\/servicetag\/([A-Za-z0-9]{7})/i);
+  if(m) text = m[1].toUpperCase();
+  $(dest).value = dest === 'fSerie' ? text.toUpperCase() : text;
+  setStatus('Código leído: ' + text);
+  validate();
+}
 
-async function scanOcr(){
-  if(busy || !grab(true)) return; busy = true;
+/* ---------- OCR genérico (cualquier marca) ---------- */
+const BRANDS = [['DELL','Dell'],['HP|HEWLETT','HP'],['LENOVO|THINKPAD|IDEAPAD','Lenovo'],['ASUS','Asus'],['ACER','Acer'],['APPLE|MACBOOK','Apple'],['SAMSUNG','Samsung'],['LG','LG'],['MSI','MSI'],['TOSHIBA','Toshiba'],['HUAWEI','Huawei'],['CISCO','Cisco'],['EPSON','Epson'],['CANON','Canon'],['BROTHER','Brother'],['LEXMARK','Lexmark'],['SONY','Sony'],['FUJITSU','Fujitsu'],['GIGABYTE','Gigabyte'],['XEROX','Xerox'],['KYOCERA','Kyocera'],['RICOH','Ricoh']];
+let dest = 'fSerie';
+
+async function readLabel(){
+  if(busy || !stream) return; busy = true; $('bRead').disabled = true;
   try{
     if(!ocrWorker){
       setStatus('Cargando motor OCR (solo la primera vez)…');
       ocrWorker = await Tesseract.createWorker('eng');
-      await ocrWorker.setParameters({tessedit_char_whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', tessedit_pageseg_mode:'6'});
+      await ocrWorker.setParameters({tessedit_pageseg_mode:'6', preserve_interword_spaces:'1'});
     }
-    preprocess();
-    const {data} = await ocrWorker.recognize(work);
-    const tokens = (data.text||'').toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
-    const found = [];
-    for(const t of tokens){
-      if(t.length===7) found.push({kind:'ST', val:t});
-      else if(t.length>=9 && t.length<=11){ const n = fixDigits(t); if(/^\d+$/.test(n)) found.push({kind:'ESC', val:n}); }
+    setStatus('Leyendo etiqueta…');
+    let best = null;
+    for(const bin of [false, true]){ // dos versiones de la imagen; se queda la de mayor confianza
+      if(!grab(true)) break; prep(bin);
+      const {data} = await ocrWorker.recognize(work);
+      if(!best || data.confidence > best.confidence) best = data;
     }
-    // consenso: acepta un valor solo si aparece en 2 lecturas seguidas
-    const keys = found.map(f=>f.kind+':'+f.val);
-    const agreed = keys.find(k => lastOcr.includes(k));
-    lastOcr = keys;
-    setStatus(keys.length ? 'Leyendo… ' + keys.join('  ') : 'Sin texto reconocible. Acerca o mejora la luz.');
-    if(agreed){ const [kind,val] = agreed.split(':'); onCode(val, 'OCR', kind); lastOcr = []; }
+    const text = best ? best.text.trim() : '';
+    if(!text){ setStatus('No se reconoció texto. Acerca la cámara, evita reflejos y vuelve a intentar.'); return; }
+    $('ocrBox').hidden = false; $('rawText').value = text; chips(); autoFill(text);
+    setStatus('Listo. Revisa los campos; toca un texto de abajo para pasarlo al campo elegido.');
   }catch(e){ setStatus('Error OCR: ' + e.message); }
-  busy = false;
+  finally{ busy = false; $('bRead').disabled = false; }
 }
 
-/* ---------- Resultado ---------- */
-let lastShown = '', lastTime = 0;
-function onCode(text, via, kind){
-  text = text.trim(); const now = Date.now();
-  if(text === lastShown && now - lastTime < 3000) return; lastShown = text; lastTime = now;
-  navigator.vibrate && navigator.vibrate(60);
-  // QR de soporte Dell u otras URLs con service tag
-  const m = text.match(/service\s*tag=([A-Za-z0-9]{7})/i) || text.match(/\/servicetag\/([A-Za-z0-9]{7})/i) || text.match(/dell\.com\/.*?([A-Z0-9]{7})$/i);
-  if(m) text = m[1].toUpperCase();
-  if(kind === 'ESC' || /^\d{9,11}$/.test(text)){ $('fEsc').value = text; if(!$('fSerie').value){ const st = escToSt(text); if(st) $('fSerie').value = st; } }
-  else $('fSerie').value = text.toUpperCase();
-  setStatus('Leído (' + via + '): ' + text);
+// Rellena solo lo que reconoce por palabra clave (Serial, S/N, Service Tag, Model…); el resto queda para tocar manualmente
+function autoFill(text){
+  const u = text.toUpperCase(), f = {};
+  for(const line of u.split(/\n/)){
+    let m;
+    if(m = line.match(/EXPRESS\s*SERVICE\s*CODE\W*([A-Z0-9 ]{9,15})/)){ const v = fixDigits(m[1].replace(/\s/g,'')); if(/^\d{9,11}$/.test(v)) f.esc = v; }
+    else if(m = line.match(/(?:SERVICE\s*TAG|SVC\s*TAG|SERIAL\s*(?:NO\.?|NUMBER|NUM\.?)?|\bS\/N|\bSN|SER\.?\s*NO|N[ÚU]MERO\s*DE\s*SERIE|\bSERIE)\s*[:#.\-]?\s*([A-Z0-9][A-Z0-9\-]{3,})/)) f.serie = m[1];
+    else if(m = line.match(/\b(?:MODEL(?:O)?|MOD\.?|M\/N|PRODUCT(?:\s*NAME)?)\s*[:#.]?\s*([A-Z0-9][A-Z0-9\-\/ ]{2,25})/)) f.modelo = m[1].trim();
+  }
+  if(f.serie) $('fSerie').value = f.serie;
+  if(f.esc) $('fEsc').value = f.esc;
+  if(f.modelo) $('fModelo').value = f.modelo;
+  if(!$('fMarca').value){ const b = BRANDS.find(([re]) => new RegExp('\\b(?:' + re + ')\\b').test(u)); if(b) $('fMarca').value = b[1]; }
   validate();
 }
+
+function chips(){
+  const box = $('chips'), seen = new Set(); box.innerHTML = '';
+  for(let t of $('rawText').value.split(/[\s:;,|]+/)){
+    t = t.replace(/^[^A-Za-z0-9]+|[^A-Za-z0-9]+$/g, ''); const u = t.toUpperCase();
+    if(u.length < 4 || seen.has(u) || u.startsWith('WWW') || !(/\d/.test(u) || t === u)) continue;
+    seen.add(u); if(seen.size > 30) break;
+    const b = document.createElement('button'); b.className = 'chip mono'; b.textContent = u;
+    b.onclick = () => { $(dest).value = u; validate(); setStatus('Pasado al campo: ' + u); };
+    box.appendChild(b);
+  }
+}
+$('rawText').addEventListener('input', chips);
+document.querySelectorAll('#seg button').forEach(b => b.onclick = () => {
+  dest = b.dataset.d; document.querySelectorAll('#seg button').forEach(x => x.classList.toggle('on', x === b));
+});
+
+/* ---------- Validación (solo avisa cuando hay datos Dell que cruzar) ---------- */
 function validate(){
   const st = $('fSerie').value.trim().toUpperCase(), esc = $('fEsc').value.trim(), el = $('chk');
-  if(!st && !esc){ el.textContent = ''; return; }
-  let msg = '', cls = 'ok';
-  if(ST_RE.test(st)){
-    msg = 'Formato de Service Tag válido (7 caracteres).';
-    if(esc){ const calc = stToEsc(st); if(calc === esc) msg += ' El Express Service Code coincide.'; else { msg += ' El ESC no coincide; debería ser ' + calc + '.'; cls = 'bad'; } }
-    else msg += ' ESC calculado: ' + stToEsc(st) + '.';
-  } else if(st){ msg = 'No tiene formato de Service Tag Dell (7 alfanuméricos). Puede ser otra marca; revísalo.'; cls = 'bad'; }
-  el.className = 'chk ' + cls; el.textContent = msg;
+  el.textContent = ''; el.className = 'chk';
+  if(ST_RE.test(st) && /^\d{9,11}$/.test(esc)){
+    const calc = stToEsc(st);
+    if(calc === esc){ el.className = 'chk ok'; el.textContent = 'Coincide: el Express Service Code corresponde al Service Tag.'; }
+    else if(/dell/i.test($('fMarca').value)){ el.className = 'chk bad'; el.textContent = 'El ESC no coincide con el Service Tag (debería ser ' + calc + '). Revisa letras y números.'; }
+  }
 }
-['fSerie','fEsc'].forEach(id => $(id).addEventListener('input', validate));
+['fSerie','fEsc','fMarca'].forEach(id => $(id).addEventListener('input', validate));
 
 /* ---------- Almacenamiento y CSV ---------- */
 const KEY = 'inventario_v1';
@@ -264,13 +321,17 @@ $('bCsv').onclick = () => {
 
 /* ---------- Pestañas ---------- */
 function setMode(m){
-  mode = m; lastOcr = [];
+  mode = m;
   $('tBar').classList.toggle('on', m==='bar'); $('tOcr').classList.toggle('on', m==='ocr');
   $('frame').className = 'frame' + (m==='bar' ? ' wide' : '');
-  if(stream) setStatus(m==='bar' ? 'Apunta al código de barras o QR.' : 'Encuadra la etiqueta dentro del recuadro.');
+  $('bRead').hidden = m !== 'ocr'; $('ocrBox').hidden = m !== 'ocr' || !$('rawText').value;
+  if(stream){
+    setStatus(m==='bar' ? 'Apunta al código de barras o QR.' : 'Encuadra la etiqueta en el recuadro y toca “Leer texto”.');
+    if(m==='bar') loop(); else loopId++;
+  }
 }
 $('tBar').onclick = () => setMode('bar'); $('tOcr').onclick = () => setMode('ocr');
-$('bCam').onclick = startCam; $('bStop').onclick = () => { stopCam(); setStatus('Cámara detenida.'); };
+$('bRead').onclick = readLabel; $('bCam').onclick = startCam; $('bStop').onclick = () => { stopCam(); setStatus('Cámara detenida.'); };
 document.addEventListener('visibilitychange', () => { if(document.hidden) stopCam(); });
 render();
 </script>

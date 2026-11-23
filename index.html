@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Inventario con cámara</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Atkinson+Hyperlegible+Mono:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#eef1f4;--card:#fff;--ink:#14202b;--mute:#5b6b7a;--line:#d3dae1;--acc:#0b5fff;--frame:#ffb000;--ok:#0a7a3d;--bad:#b3261e}
+@media(prefers-color-scheme:dark){:root{--bg:#10161c;--card:#19222b;--ink:#e8eef3;--mute:#93a3b2;--line:#2b3946;--acc:#6ea0ff;--ok:#4cc27f;--bad:#ff8a80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 "Atkinson Hyperlegible",system-ui,sans-serif}
+main{max-width:560px;margin:0 auto;padding:12px 12px 40px}
+h1{font-size:1.25rem;margin:8px 0 12px}h2{font-size:1rem;margin:0 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px}
+.mono,input,textarea{font-family:"Atkinson Hyperlegible Mono",ui-monospace,monospace}
+.tabs{display:flex;gap:6px;margin-bottom:10px}
+button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:8px;padding:10px 14px;cursor:pointer}
+button.on,button.pri{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:700}
+@media(prefers-color-scheme:dark){button.on,button.pri{color:#0b1520}}
+.tabs button{flex:1}
+button:focus-visible,input:focus-visible,textarea:focus-visible{outline:3px solid var(--acc);outline-offset:2px}
+.cam{position:relative;background:#000;border-radius:8px;overflow:hidden;aspect-ratio:4/3}
+video{width:100%;height:100%;object-fit:cover;display:block}
+.frame{position:absolute;left:8%;right:8%;top:36%;height:28%;border:3px solid var(--frame);border-radius:6px;box-shadow:0 0 0 999px rgba(0,0,0,.45);pointer-events:none}
+.frame.wide{top:12%;height:76%}
+.status{margin:8px 0 0;color:var(--mute);min-height:1.4em}
+.row{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+label{display:block;font-size:.85rem;color:var(--mute);margin:10px 0 3px}
+input,textarea{width:100%;font-size:1rem;padding:9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.chk{font-size:.9rem;margin-top:4px}.ok{color:var(--ok)}.bad{color:var(--bad)}
+.item{border-top:1px solid var(--line);padding:8px 0;display:flex;justify-content:space-between;gap:8px;align-items:center}
+.item:first-child{border-top:0}.item small{color:var(--mute)}
+.item button{padding:6px 10px}
+canvas#work{display:none}
+</style>
+</head>
+<body>
+<main>
+<h1>Inventario con cámara</h1>
+
+<section class="card">
+  <div class="tabs" role="tablist">
+    <button id="tBar" class="on">Barras / QR</button>
+    <button id="tOcr">Texto (OCR)</button>
+  </div>
+  <div class="cam"><video id="video" playsinline muted></video><div id="frame" class="frame wide"></div></div>
+  <p id="status" class="status" aria-live="polite">Toca “Iniciar cámara”.</p>
+  <div class="row">
+    <button id="bCam" class="pri">Iniciar cámara</button>
+    <button id="bStop">Detener</button>
+    <button id="bTorch" hidden>Linterna</button>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Registro del equipo</h2>
+  <label for="fSerie">Serie / Service Tag</label>
+  <input id="fSerie" class="mono" autocapitalize="characters" autocomplete="off">
+  <div id="chk" class="chk"></div>
+  <label for="fEsc">Express Service Code (solo números)</label>
+  <input id="fEsc" class="mono" inputmode="numeric" autocomplete="off">
+  <div class="grid">
+    <div><label for="fMarca">Marca</label><input id="fMarca" placeholder="Dell"></div>
+    <div><label for="fModelo">Modelo</label><input id="fModelo"></div>
+  </div>
+  <label for="fUbi">Ubicación</label><input id="fUbi">
+  <label for="fNotas">Notas</label><textarea id="fNotas" rows="2"></textarea>
+  <div class="row">
+    <button id="bSave" class="pri">Guardar equipo</button>
+    <button id="bClear">Limpiar</button>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Equipos guardados (<span id="count">0</span>)</h2>
+  <div id="list"></div>
+  <div class="row">
+    <button id="bCsv" class="pri">Exportar CSV</button>
+    <button id="bWipe">Borrar todo</button>
+  </div>
+</section>
+</main>
+<canvas id="work"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const video = $('video'), work = $('work'), ctx = work.getContext('2d', {willReadFrequently:true});
+let stream = null, mode = 'bar', timer = null, busy = false, detector = null, zxing = null, ocrWorker = null;
+let lastOcr = [];
+
+/* ---------- Utilidades Dell ---------- */
+const ST_RE = /^[A-Z0-9]{7}$/;
+const stToEsc = st => ST_RE.test(st) ? String(parseInt(st, 36)) : '';
+const escToSt = esc => /^\d{9,11}$/.test(esc) ? Number(esc).toString(36).toUpperCase().padStart(7, '0') : '';
+const fixDigits = s => s.replace(/[OQD]/g,'0').replace(/[IL]/g,'1').replace(/S/g,'5').replace(/B/g,'8').replace(/Z/g,'2');
+
+function setStatus(t){ $('status').textContent = t; }
+
+/* ---------- Cámara ---------- */
+async function startCam(){
+  try{
+    await stopCam();
+    stream = await navigator.mediaDevices.getUserMedia({
+      video:{facingMode:{ideal:'environment'}, width:{ideal:1920}, height:{ideal:1080}}, audio:false});
+    video.srcObject = stream; await video.play();
+    const track = stream.getVideoTracks()[0], caps = track.getCapabilities ? track.getCapabilities() : {};
+    if(caps.focusMode && caps.focusMode.includes('continuous')) track.applyConstraints({advanced:[{focusMode:'continuous'}]}).catch(()=>{});
+    $('bTorch').hidden = !caps.torch;
+    setStatus(mode==='bar' ? 'Apunta al código de barras o QR.' : 'Encuadra la etiqueta dentro del recuadro.');
+    loop();
+  }catch(e){
+    setStatus('No se pudo abrir la cámara: ' + e.message + ' (requiere HTTPS y permiso de cámara).');
+  }
+}
+async function stopCam(){
+  clearTimeout(timer); timer = null;
+  if(stream){ stream.getTracks().forEach(t=>t.stop()); stream = null; }
+  video.srcObject = null;
+}
+let torchOn = false;
+$('bTorch').onclick = () => { torchOn = !torchOn; stream.getVideoTracks()[0].applyConstraints({advanced:[{torch:torchOn}]}).catch(()=>{}); };
+
+/* ---------- Captura de fotograma ---------- */
+function grab(crop){
+  const vw = video.videoWidth, vh = video.videoHeight; if(!vw) return false;
+  // el recuadro guía cubre aprox. el 84% x 28% (OCR) o 84% x 76% (barras) del video visible
+  const r = crop ? {x:.08,y:.36,w:.84,h:.28} : {x:.08,y:.12,w:.84,h:.76};
+  const sx = vw*r.x, sy = vh*r.y, sw = vw*r.w, sh = vh*r.h;
+  const scale = crop ? Math.min(2, 1400/sw) : Math.min(1, 1280/sw);
+  work.width = Math.round(sw*scale); work.height = Math.round(sh*scale);
+  ctx.drawImage(video, sx, sy, sw, sh, 0, 0, work.width, work.height);
+  return true;
+}
+function preprocess(){ // gris + contraste + umbral adaptativo simple (Otsu)
+  const img = ctx.getImageData(0,0,work.width,work.height), d = img.data, hist = new Array(256).fill(0);
+  for(let i=0;i<d.length;i+=4){ const g = (d[i]*.299+d[i+1]*.587+d[i+2]*.114)|0; d[i]=g; hist[g]++; }
+  const total = work.width*work.height; let sum=0; for(let i=0;i<256;i++) sum+=i*hist[i];
+  let sB=0,wB=0,max=0,th=128;
+  for(let t=0;t<256;t++){ wB+=hist[t]; if(!wB) continue; const wF=total-wB; if(!wF) break;
+    sB+=t*hist[t]; const mB=sB/wB, mF=(sum-sB)/wF, v=wB*wF*(mB-mF)**2; if(v>max){max=v;th=t;} }
+  for(let i=0;i<d.length;i+=4){ const v = d[i]>th?255:0; d[i]=d[i+1]=d[i+2]=v; }
+  ctx.putImageData(img,0,0);
+}
+
+/* ---------- Bucle de lectura ---------- */
+function loop(){
+  if(!stream) return;
+  (mode==='bar' ? scanBar : scanOcr)().finally(()=>{ if(stream) timer = setTimeout(loop, mode==='bar' ? 150 : 700); });
+}
+
+async function scanBar(){
+  if(!grab(false)) return;
+  try{
+    let text = null;
+    if('BarcodeDetector' in window){
+      detector = detector || new BarcodeDetector();
+      const r = await detector.detect(work); if(r.length) text = r[0].rawValue;
+    } else {
+      if(!zxing){ const h = new Map(); h.set(ZXing.DecodeHintType.TRY_HARDER, true); zxing = new ZXing.MultiFormatReader(); zxing.setHints(h); }
+      const bmp = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(new ZXing.HTMLCanvasElementLuminanceSource(work)));
+      text = zxing.decode(bmp).getText();
+    }
+    if(text) onCode(text, 'código');
+  }catch(e){ /* sin código en este fotograma */ }
+}
+
+async function scanOcr(){
+  if(busy || !grab(true)) return; busy = true;
+  try{
+    if(!ocrWorker){
+      setStatus('Cargando motor OCR (solo la primera vez)…');
+      ocrWorker = await Tesseract.createWorker('eng');
+      await ocrWorker.setParameters({tessedit_char_whitelist:'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', tessedit_pageseg_mode:'6'});
+    }
+    preprocess();
+    const {data} = await ocrWorker.recognize(work);
+    const tokens = (data.text||'').toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean);
+    const found = [];
+    for(const t of tokens){
+      if(t.length===7) found.push({kind:'ST', val:t});
+      else if(t.length>=9 && t.length<=11){ const n = fixDigits(t); if(/^\d+$/.test(n)) found.push({kind:'ESC', val:n}); }
+    }
+    // consenso: acepta un valor solo si aparece en 2 lecturas seguidas
+    const keys = found.map(f=>f.kind+':'+f.val);
+    const agreed = keys.find(k => lastOcr.includes(k));
+    lastOcr = keys;
+    setStatus(keys.length ? 'Leyendo… ' + keys.join('  ') : 'Sin texto reconocible. Acerca o mejora la luz.');
+    if(agreed){ const [kind,val] = agreed.split(':'); onCode(val, 'OCR', kind); lastOcr = []; }
+  }catch(e){ setStatus('Error OCR: ' + e.message); }
+  busy = false;
+}
+
+/* ---------- Resultado ---------- */
+let lastShown = '', lastTime = 0;
+function onCode(text, via, kind){
+  text = text.trim(); const now = Date.now();
+  if(text === lastShown && now - lastTime < 3000) return; lastShown = text; lastTime = now;
+  navigator.vibrate && navigator.vibrate(60);
+  // QR de soporte Dell u otras URLs con service tag
+  const m = text.match(/service\s*tag=([A-Za-z0-9]{7})/i) || text.match(/\/servicetag\/([A-Za-z0-9]{7})/i) || text.match(/dell\.com\/.*?([A-Z0-9]{7})$/i);
+  if(m) text = m[1].toUpperCase();
+  if(kind === 'ESC' || /^\d{9,11}$/.test(text)){ $('fEsc').value = text; if(!$('fSerie').value){ const st = escToSt(text); if(st) $('fSerie').value = st; } }
+  else $('fSerie').value = text.toUpperCase();
+  setStatus('Leído (' + via + '): ' + text);
+  validate();
+}
+function validate(){
+  const st = $('fSerie').value.trim().toUpperCase(), esc = $('fEsc').value.trim(), el = $('chk');
+  if(!st && !esc){ el.textContent = ''; return; }
+  let msg = '', cls = 'ok';
+  if(ST_RE.test(st)){
+    msg = 'Formato de Service Tag válido (7 caracteres).';
+    if(esc){ const calc = stToEsc(st); if(calc === esc) msg += ' El Express Service Code coincide.'; else { msg += ' El ESC no coincide; debería ser ' + calc + '.'; cls = 'bad'; } }
+    else msg += ' ESC calculado: ' + stToEsc(st) + '.';
+  } else if(st){ msg = 'No tiene formato de Service Tag Dell (7 alfanuméricos). Puede ser otra marca; revísalo.'; cls = 'bad'; }
+  el.className = 'chk ' + cls; el.textContent = msg;
+}
+['fSerie','fEsc'].forEach(id => $(id).addEventListener('input', validate));
+
+/* ---------- Almacenamiento y CSV ---------- */
+const KEY = 'inventario_v1';
+const load = () => { try{ return JSON.parse(localStorage.getItem(KEY)) || []; }catch(e){ return []; } };
+const save = a => { try{ localStorage.setItem(KEY, JSON.stringify(a)); }catch(e){ alert('No se pudo guardar: ' + e.message); } };
+const FIELDS = ['fSerie','fEsc','fMarca','fModelo','fUbi','fNotas'];
+
+function render(){
+  const a = load(); $('count').textContent = a.length;
+  $('list').innerHTML = a.length ? '' : '<p class="status">Aún no hay equipos. Escanea o escribe uno y guárdalo.</p>';
+  a.slice().reverse().forEach((r,i) => {
+    const d = document.createElement('div'); d.className = 'item';
+    const idx = a.length-1-i;
+    d.innerHTML = '<div><strong class="mono"></strong><br><small></small></div><button aria-label="Eliminar">Eliminar</button>';
+    d.querySelector('strong').textContent = r.serie || r.esc || '(sin serie)';
+    d.querySelector('small').textContent = [r.marca, r.modelo, r.ubicacion].filter(Boolean).join(' · ');
+    d.querySelector('button').onclick = () => { const b = load(); b.splice(idx,1); save(b); render(); };
+    $('list').appendChild(d);
+  });
+}
+$('bSave').onclick = () => {
+  const [serie,esc,marca,modelo,ubicacion,notas] = FIELDS.map(id => $(id).value.trim());
+  if(!serie && !esc){ setStatus('Escribe o escanea al menos una serie o ESC.'); return; }
+  const a = load();
+  if(serie && a.some(r => r.serie === serie.toUpperCase()) && !confirm('Esa serie ya está registrada. ¿Guardar de todos modos?')) return;
+  a.push({serie:serie.toUpperCase(), esc, marca, modelo, ubicacion, notas, fecha:new Date().toISOString()});
+  save(a); render(); setStatus('Equipo guardado.');
+  ['fSerie','fEsc','fModelo','fNotas'].forEach(id => $(id).value=''); $('chk').textContent='';
+};
+$('bClear').onclick = () => { FIELDS.forEach(id => $(id).value=''); $('chk').textContent=''; };
+$('bWipe').onclick = () => { if(confirm('¿Borrar todos los equipos guardados?')){ save([]); render(); } };
+$('bCsv').onclick = () => {
+  const a = load(); if(!a.length){ setStatus('No hay datos para exportar.'); return; }
+  const cols = ['serie','esc','marca','modelo','ubicacion','notas','fecha'];
+  const q = v => '"' + String(v ?? '').replace(/"/g,'""') + '"';
+  const csv = '\ufeff' + cols.join(',') + '\n' + a.map(r => cols.map(c => q(r[c])).join(',')).join('\n');
+  const url = URL.createObjectURL(new Blob([csv], {type:'text/csv;charset=utf-8'}));
+  const l = document.createElement('a'); l.href = url; l.download = 'inventario_' + new Date().toISOString().slice(0,10) + '.csv'; l.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
+
+/* ---------- Pestañas ---------- */
+function setMode(m){
+  mode = m; lastOcr = [];
+  $('tBar').classList.toggle('on', m==='bar'); $('tOcr').classList.toggle('on', m==='ocr');
+  $('frame').className = 'frame' + (m==='bar' ? ' wide' : '');
+  if(stream) setStatus(m==='bar' ? 'Apunta al código de barras o QR.' : 'Encuadra la etiqueta dentro del recuadro.');
+}
+$('tBar').onclick = () => setMode('bar'); $('tOcr').onclick = () => setMode('ocr');
+$('bCam').onclick = startCam; $('bStop').onclick = () => { stopCam(); setStatus('Cámara detenida.'); };
+document.addEventListener('visibilitychange', () => { if(document.hidden) stopCam(); });
+render();
+</script>
+</body>
+</html>
